@@ -52,14 +52,21 @@ class IGMPQuerier:
                 if igmp.type == 0x16:  # IGMPv2 Membership Report
                     group_address = igmp.gaddr
                     src_address = packet[IP].src
-                    self.process_report(group_address, src_address)
+                    if self.is_valid_multicast(group_address):
+                        self.process_report(group_address, src_address)
                 elif igmp.type == 0x17:  # IGMPv2 Leave Group
                     group_address = igmp.gaddr
                     src_address = packet[IP].src
-                    self.process_leave(group_address, src_address)
+                    if self.is_valid_multicast(group_address):
+                        self.process_leave(group_address, src_address)
 
         self.sniffer = AsyncSniffer(iface=self.interface, prn=process_packet, filter="igmp")
         self.sniffer.start()
+
+    def is_valid_multicast(self, group_address):
+        octets = group_address.split('.')
+        first_octet = int(octets[0])
+        return 224 <= first_octet <= 239
 
     def stop_listening(self):
         if hasattr(self, 'sniffer'):
