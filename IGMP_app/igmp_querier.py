@@ -7,7 +7,6 @@ import socket
 from scapy.all import IP, send, Ether, AsyncSniffer
 from scapy.contrib.igmp import IGMP
 
-
 class IGMPQuerier:
     def __init__(self, interface, log_callback, update_members_callback):
         self.interface = interface
@@ -15,11 +14,12 @@ class IGMPQuerier:
         self.running = True
         self.robustness_variable = 2
         self.query_interval = 10
-        self.max_response_time = 100
+        self.max_response_time = 8  # 8 seconds max response time
         self.log_callback = log_callback
         self.update_members_callback = update_members_callback
+        self.timers = {}  # To store timers for each host in each group
 
-        # Lấy địa chỉ MAC và IP của interface
+        # Get MAC and IP of the interface
         self.mac_address = self.get_mac_address(interface)
         self.ip_address = self.get_ip_address(interface)
 
@@ -68,6 +68,10 @@ class IGMPQuerier:
     def process_report(self, group_address, src_address):
         if group_address in self.group_members:
             self.group_members[group_address].add(src_address)
+            # Stop the timer since we received a report within the response time
+            if (group_address, src_address) in self.timers:
+                self.timers[(group_address, src_address)].cancel()
+                del self.timers[(group_address, src_address)]
         else:
             self.group_members[group_address] = {src_address}
         self.log(f"Received IGMP report from {src_address} for group {group_address}")
@@ -83,22 +87,41 @@ class IGMPQuerier:
         self.update_members()
 
     def send_general_query(self):
-        query = Ether(src=self.mac_address) / IP(src=self.ip_address, dst="224.0.0.1") / IGMP(type=0x11, gaddr="0.0.0.0")
+        query = Ether(src=self.mac_address) / IP(src=self.ip_address, dst="224.0.0.1") / IGMP(type=0x11, gaddr="0.0.0.0", mrcode=self.max_response_time)
         for _ in range(self.robustness_variable):
             if not self.running:
                 break
             sendp(query, iface=self.interface)
             self.log("Sent general IGMP query")
+            self.start_response_timers()  # Start timers for response check
             self.sleep_with_check(self.query_interval)
 
     def send_group_specific_query(self, group_address):
-        query = Ether(src=self.mac_address) / IP(src=self.ip_address, dst=group_address) / IGMP(type=0x11, gaddr=group_address)
+        query = Ether(src=self.mac_address) / IP(src=self.ip_address, dst=group_address) / IGMP(type=0x11, gaddr=group_address, mrcode=self.max_response_time)
         for _ in range(self.robustness_variable):
             if not self.running:
                 break
             sendp(query, iface=self.interface)
             self.log(f"Sent group-specific IGMP query to group {group_address}")
+            self.start_response_timers()  # Start timers for response check
             self.sleep_with_check(self.query_interval)
+
+    def start_response_timers(self):
+        for group, members in self.group_members.items():
+            for member in list(members):
+                if (group, member) in self.timers:
+                    self.timers[(group, member)].cancel()
+                timer = threading.Timer(self.max_response_time, self.check_host_response, args=(group, member))
+                self.timers[(group, member)] = timer
+                timer.start()
+
+    def check_host_response(self, group_address, src_address):
+        if group_address in self.group_members and src_address in self.group_members[group_address]:
+            self.group_members[group_address].remove(src_address)
+            self.log(f"Host {src_address} removed from group {group_address} due to no response")
+            if not self.group_members[group_address]:
+                del self.group_members[group_address]
+            self.update_members()
 
     def sleep_with_check(self, duration):
         step = 0.1
@@ -127,7 +150,6 @@ class IGMPQuerier:
         self.stop_listening()
         if threading.current_thread() != threading.main_thread():
             threading.current_thread().join()
-
 
 
 class IGMPQuerierGUI:
